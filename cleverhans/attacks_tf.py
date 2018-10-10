@@ -1800,13 +1800,13 @@ def _project_perturbation(perturbation, epsilon, input_image):
   """Project `perturbation` onto L-infinity ball of radius `epsilon`."""
   # Ensure inputs are in the correct range
   with tf.control_dependencies([
-      tf.assert_less_equal(input_image, 1.0),
-      tf.assert_greater_equal(input_image, 0.0)
+      tf.assert_less_equal(input_image, 0.5),
+      tf.assert_greater_equal(input_image, -0.5)
   ]):
     clipped_perturbation = tf.clip_by_value(
         perturbation, -epsilon, epsilon)
     new_image = tf.clip_by_value(
-        input_image + clipped_perturbation, 0., 1.)
+        input_image + clipped_perturbation, -0.5, 0.5)
     return new_image - input_image
 
 
