@@ -15,6 +15,7 @@ from __future__ import print_function
 import tensorflow as tf
 import numpy as np
 
+from cleverhans.compat import reduce_mean, reduce_prod
 from cleverhans.model import Model
 from cleverhans.serial import PicklableVariable as PV
 from cleverhans.utils import ordered_union
@@ -146,6 +147,7 @@ class MLP(PicklableModel):
 
 class Layer(PicklableModel):
   def __init__(self, name=None, parent=None):
+    super(Layer, self).__init__()
     if name is not None:
       self.name = name
     self.parent = parent
@@ -235,7 +237,7 @@ class Conv2D(Layer):
     super(Conv2D, self).__init__(**kwargs)
 
   def set_input_shape(self, input_shape):
-    batch_size, rows, cols, input_channels = input_shape
+    _batch_size, _rows, _cols, input_channels = input_shape
     assert len(self.kernel_shape) == 2
     kernel_shape = tuple(self.kernel_shape) + (input_channels,
                                                self.output_channels)
@@ -385,9 +387,6 @@ class ELU(Layer):
 
 class SELU(Layer):
 
-  def __init__(self):
-    pass
-
   def set_input_shape(self, shape):
     self.input_shape = shape
     self.output_shape = shape
@@ -408,9 +407,6 @@ class SELU(Layer):
 
 
 class TanH(Layer):
-
-  def __init__(self):
-    pass
 
   def set_input_shape(self, shape):
     self.input_shape = shape
@@ -560,12 +556,22 @@ class PerImageStandardize(Layer):
     return []
 
   def fprop(self, x, **kwargs):
-    # TODO: before adding dataset augmentation, we didn't have to do this.
-    # Why?
-    with tf.device("/CPU:0"):
-      out = tf.map_fn(
-          lambda ex: tf.image.per_image_standardization(ex), x)
-    return out
+    axis = [1, 2, 3]
+    mean = reduce_mean(x, axis=axis, keepdims=True)
+    variance = reduce_mean(
+        tf.square(x), axis=axis, keepdims=True) - tf.square(mean)
+    variance = tf.nn.relu(variance)
+    stddev = tf.sqrt(variance)
+
+    num_pixels = reduce_prod(tf.shape(x)[1:])
+
+    min_stddev = tf.rsqrt(tf.to_float(num_pixels))
+    pixel_value_scale = tf.maximum(stddev, min_stddev)
+    pixel_value_offset = mean
+
+    x = tf.subtract(x, pixel_value_offset)
+    x = tf.div(x, pixel_value_scale)
+    return x
 
 
 class Dropout(Layer):
@@ -694,8 +700,6 @@ class ResidualWithGroupNorm(Layer):
       orig_x = tf.pad(orig_x, [[0, 0], [0, 0], [0, 0],
                                [(out_filter - in_filter) // 2,
                                 (out_filter - in_filter) // 2]])
-    x_shape = x.get_shape()
-    orig_x_shape = orig_x.get_shape()
     x = x + orig_x
     return x
 
@@ -777,8 +781,6 @@ class BatchNorm(Layer):
                    name=self.name + "_beta")
 
   def fprop(self, x, **kwargs):
-    shape = tf.shape(x)
-    batch_size = shape[0]
     mean, var = tf.nn.moments(x, [0, 1, 2], keep_dims=True)
     x = (x - mean) * tf.rsqrt(var + self.eps)
     x = x * self.gamma.var + self.beta.var
@@ -850,7 +852,5 @@ class ResidualWithBatchNorm(Layer):
       orig_x = tf.pad(orig_x, [[0, 0], [0, 0], [0, 0],
                                [(out_filter - in_filter) // 2,
                                 (out_filter - in_filter) // 2]])
-    x_shape = x.get_shape()
-    orig_x_shape = orig_x.get_shape()
     x = x + orig_x
     return x

@@ -1,15 +1,14 @@
 from abc import ABCMeta
 import collections
 import warnings
-
 import numpy as np
 from six.moves import xrange
+import tensorflow as tf
 
-import cleverhans.utils as utils
+from cleverhans import utils
 from cleverhans.model import Model, CallableModelWrapper
 from cleverhans.compat import reduce_sum, reduce_mean
-from cleverhans.compat import reduce_max, reduce_min
-from cleverhans.compat import reduce_any
+from cleverhans.compat import reduce_max
 from cleverhans.utils_tf import clip_eta
 
 _logger = utils.create_logger("cleverhans.attacks")
@@ -21,23 +20,33 @@ class Attack(object):
   """
   __metaclass__ = ABCMeta
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     :param model: An instance of the cleverhans.model.Model class.
-    :param back: The backend to use. Currently 'tf' is the only option.
-    :param sess: The tf session to run graphs in
+    :param sess: The tf session to run graphs in.
+    :param dtypestr: Floating point precision to use (change to float64
+                     to avoid numerical instabilities).
+    :param back: (deprecated and will be removed on or after 2019-03-26).
+                 The backend to use. Currently 'tf' is the only option.
     """
-    if back == 'tf':
-      import tensorflow as tf
-      self.tf_dtype = tf.as_dtype(dtypestr)
-      if sess is None:
-        sess = tf.get_default_session()
-    else:
-      raise ValueError("Backend argument must be 'tf'.")
+    if 'back' in kwargs:
+      if kwargs['back'] == 'tf':
+        warnings.warn("Argument back to attack constructors is not needed"
+                      " anymore and will be removed on or after 2019-03-26."
+                      " All attacks are implemented using TensorFlow.")
+      else:
+        raise ValueError("Backend argument must be 'tf' and is now deprecated"
+                         "It will be removed on or after 2019-03-26.")
 
+    self.tf_dtype = tf.as_dtype(dtypestr)
     self.np_dtype = np.dtype(dtypestr)
 
-    import cleverhans.attacks_tf as attacks_tf
+    if sess is None:
+      sess = tf.get_default_session()
+    if not isinstance(sess, tf.Session):
+      raise ValueError("sess is not an instance of tf.Session")
+
+    from cleverhans import attacks_tf
     attacks_tf.np_dtype = self.np_dtype
     attacks_tf.tf_dtype = self.tf_dtype
 
@@ -47,7 +56,6 @@ class Attack(object):
 
     # Prepare attributes
     self.model = model
-    self.back = back
     self.sess = sess
     self.dtypestr = dtypestr
 
@@ -82,6 +90,8 @@ class Attack(object):
 
     error = "Sub-classes must implement generate."
     raise NotImplementedError(error)
+    # Include an unused return so pylint understands the method signature
+    return x
 
   def construct_graph(self, fixed, feedable, x_val, hash_key):
     """
@@ -96,8 +106,6 @@ class Attack(object):
     # try our very best to create a TF placeholder for each of the
     # feedable keyword arguments, and check the types are one of
     # the allowed types
-    import tensorflow as tf
-
     class_name = str(self.__class__).split(".")[-1][:-2]
     _logger.info("Constructing new graph for attack " + class_name)
 
@@ -212,8 +220,6 @@ class Attack(object):
     Otherwise, use the model's prediction as the label and perform an
     untargeted attack.
     """
-    import tensorflow as tf
-
     if 'y' in kwargs and 'y_target' in kwargs:
       raise ValueError("Can not set both 'y' and 'y_target'.")
     elif 'y' in kwargs:
@@ -251,7 +257,7 @@ class FastGradientMethod(Attack):
   Paper link: https://arxiv.org/abs/1412.6572
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Create a FastGradientMethod instance.
     Note: the model parameter should be an instance of the
@@ -260,7 +266,7 @@ class FastGradientMethod(Attack):
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'probs')
 
-    super(FastGradientMethod, self).__init__(model, back, sess, dtypestr)
+    super(FastGradientMethod, self).__init__(model, sess, dtypestr, **kwargs)
     self.feedable_kwargs = {
         'eps': self.np_dtype,
         'y': self.np_dtype,
@@ -295,7 +301,7 @@ class FastGradientMethod(Attack):
 
     from .attacks_tf import fgm
 
-    labels, nb_classes = self.get_or_guess_labels(x, kwargs)
+    labels, _nb_classes = self.get_or_guess_labels(x, kwargs)
 
     return fgm(
         x,
@@ -364,8 +370,8 @@ class ProjectedGradientDescent(Attack):
 
   FGM_CLASS = FastGradientMethod
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32',
-               default_rand_init=True):
+  def __init__(self, model, sess=None, dtypestr='float32',
+               default_rand_init=True, **kwargs):
     """
     Create a ProjectedGradientDescent instance.
     Note: the model parameter should be an instance of the
@@ -374,8 +380,8 @@ class ProjectedGradientDescent(Attack):
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'probs')
 
-    super(ProjectedGradientDescent, self).__init__(model, back, sess=sess,
-                                                   dtypestr=dtypestr)
+    super(ProjectedGradientDescent, self).__init__(model, sess=sess,
+                                                   dtypestr=dtypestr, **kwargs)
     self.feedable_kwargs = {
         'eps': self.np_dtype,
         'eps_iter': self.np_dtype,
@@ -408,8 +414,6 @@ class ProjectedGradientDescent(Attack):
     :param clip_min: (optional float) Minimum input component value
     :param clip_max: (optional float) Maximum input component value
     """
-    import tensorflow as tf
-
     # Parse and save attack-specific parameters
     assert self.parse_params(**kwargs)
 
@@ -447,7 +451,6 @@ class ProjectedGradientDescent(Attack):
     # Use getattr() to avoid errors in eager execution attacks
     FGM = self.FGM_CLASS(
         self.model,
-        back=getattr(self, 'back', None),
         sess=getattr(self, 'sess', None),
         dtypestr=self.dtypestr)
 
@@ -463,7 +466,6 @@ class ProjectedGradientDescent(Attack):
 
       # Clipping perturbation eta to self.ord norm ball
       eta = adv_x - x
-      from cleverhans.utils_tf import clip_eta
       eta = clip_eta(eta, self.ord, self.eps)
       return i + 1, eta
 
@@ -535,17 +537,19 @@ class ProjectedGradientDescent(Attack):
 
 
 class BasicIterativeMethod(ProjectedGradientDescent):
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
-    super(BasicIterativeMethod, self).__init__(model, back, sess=sess,
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
+    super(BasicIterativeMethod, self).__init__(model, sess=sess,
                                                dtypestr=dtypestr,
-                                               default_rand_init=False)
+                                               default_rand_init=False,
+                                               **kwargs)
 
 
 class MadryEtAl(ProjectedGradientDescent):
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
-    super(MadryEtAl, self).__init__(model, back, sess=sess,
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
+    super(MadryEtAl, self).__init__(model, sess=sess,
                                     dtypestr=dtypestr,
-                                    default_rand_init=True)
+                                    default_rand_init=True,
+                                    **kwargs)
 
 
 class MomentumIterativeMethod(Attack):
@@ -557,7 +561,7 @@ class MomentumIterativeMethod(Attack):
   Paper link: https://arxiv.org/pdf/1710.06081.pdf
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Create a MomentumIterativeMethod instance.
     Note: the model parameter should be an instance of the
@@ -566,8 +570,8 @@ class MomentumIterativeMethod(Attack):
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'probs')
 
-    super(MomentumIterativeMethod, self).__init__(model, back, sess,
-                                                  dtypestr)
+    super(MomentumIterativeMethod, self).__init__(model, sess, dtypestr,
+                                                  **kwargs)
     self.feedable_kwargs = {
         'eps': self.np_dtype,
         'eps_iter': self.np_dtype,
@@ -597,8 +601,6 @@ class MomentumIterativeMethod(Attack):
     :param clip_min: (optional float) Minimum input component value
     :param clip_max: (optional float) Maximum input component value
     """
-    import tensorflow as tf
-
     # Parse and save attack-specific parameters
     assert self.parse_params(**kwargs)
 
@@ -607,7 +609,7 @@ class MomentumIterativeMethod(Attack):
     adv_x = x
 
     # Fix labels to the first model predictions for loss computation
-    y, nb_classes = self.get_or_guess_labels(x, kwargs)
+    y, _nb_classes = self.get_or_guess_labels(x, kwargs)
     y = y / reduce_sum(y, 1, keepdims=True)
     targeted = (self.y_target is not None)
 
@@ -725,7 +727,7 @@ class SaliencyMapMethod(Attack):
   Paper link: https://arxiv.org/pdf/1511.07528.pdf
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Create a SaliencyMapMethod instance.
     Note: the model parameter should be an instance of the
@@ -734,9 +736,8 @@ class SaliencyMapMethod(Attack):
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'probs')
 
-    super(SaliencyMapMethod, self).__init__(model, back, sess, dtypestr)
+    super(SaliencyMapMethod, self).__init__(model, sess, dtypestr, **kwargs)
 
-    import tensorflow as tf
     self.feedable_kwargs = {'y_target': self.tf_dtype}
     self.structural_kwargs = [
         'theta', 'gamma', 'clip_max', 'clip_min', 'symbolic_impl'
@@ -754,8 +755,6 @@ class SaliencyMapMethod(Attack):
     :param clip_max: (optional float) Maximum component value for clipping
     :param y_target: (optional) Target tensor if the attack is targeted
     """
-    import tensorflow as tf
-
     # Parse and save attack-specific parameters
     assert self.parse_params(**kwargs)
 
@@ -885,7 +884,7 @@ class VirtualAdversarialMethod(Attack):
 
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Note: the model parameter should be an instance of the
     cleverhans.model.Model abstraction provided by CleverHans.
@@ -893,10 +892,9 @@ class VirtualAdversarialMethod(Attack):
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'logits')
 
-    super(VirtualAdversarialMethod, self).__init__(model, back, sess,
-                                                   dtypestr)
+    super(VirtualAdversarialMethod, self).__init__(model, sess, dtypestr,
+                                                   **kwargs)
 
-    import tensorflow as tf
     self.feedable_kwargs = {
         'eps': self.tf_dtype,
         'xi': self.tf_dtype,
@@ -970,7 +968,7 @@ class CarliniWagnerL2(Attack):
   as this attack is often much slower than others.
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Note: the model parameter should be an instance of the
     cleverhans.model.Model abstraction provided by CleverHans.
@@ -978,9 +976,8 @@ class CarliniWagnerL2(Attack):
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'logits')
 
-    super(CarliniWagnerL2, self).__init__(model, back, sess, dtypestr)
+    super(CarliniWagnerL2, self).__init__(model, sess, dtypestr, **kwargs)
 
-    import tensorflow as tf
     self.feedable_kwargs = {'y': self.tf_dtype, 'y_target': self.tf_dtype}
 
     self.structural_kwargs = [
@@ -1028,7 +1025,6 @@ class CarliniWagnerL2(Attack):
     :param clip_min: (optional float) Minimum input component value
     :param clip_max: (optional float) Maximum input component value
     """
-    import tensorflow as tf
     from .attacks_tf import CarliniWagnerL2 as CWL2
     self.parse_params(**kwargs)
 
@@ -1089,7 +1085,7 @@ class ElasticNetMethod(Attack):
   Paper link: https://arxiv.org/abs/1709.04114
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Note: the model parameter should be an instance of the
     cleverhans.model.Model abstraction provided by CleverHans.
@@ -1097,9 +1093,8 @@ class ElasticNetMethod(Attack):
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'logits')
 
-    super(ElasticNetMethod, self).__init__(model, back, sess, dtypestr)
+    super(ElasticNetMethod, self).__init__(model, sess, dtypestr, **kwargs)
 
-    import tensorflow as tf
     self.feedable_kwargs = {'y': self.tf_dtype, 'y_target': self.tf_dtype}
 
     self.structural_kwargs = [
@@ -1159,7 +1154,6 @@ class ElasticNetMethod(Attack):
     :param clip_min: (optional float) Minimum input component value
     :param clip_max: (optional float) Maximum input component value
     """
-    import tensorflow as tf
     self.parse_params(**kwargs)
 
     from .attacks_tf import ElasticNetMethod as EAD
@@ -1222,14 +1216,14 @@ class DeepFool(Attack):
   Paper link: "https://arxiv.org/pdf/1511.04599.pdf"
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Create a DeepFool instance.
     """
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'logits')
 
-    super(DeepFool, self).__init__(model, back, sess, dtypestr)
+    super(DeepFool, self).__init__(model, sess, dtypestr, **kwargs)
 
     self.structural_kwargs = [
         'over_shoot', 'max_iter', 'clip_max', 'clip_min', 'nb_candidate'
@@ -1252,7 +1246,6 @@ class DeepFool(Attack):
     :param clip_max: Maximum component value for clipping
     """
 
-    import tensorflow as tf
     from .attacks_tf import jacobian_graph, deepfool_batch
 
     # Parse and save attack-specific parameters
@@ -1319,7 +1312,7 @@ class LBFGS(Attack):
   Paper link: "https://arxiv.org/pdf/1312.6199.pdf"
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Note: the model parameter should be an instance of the
     cleverhans.model.Model abstraction provided by CleverHans.
@@ -1327,9 +1320,8 @@ class LBFGS(Attack):
     if not isinstance(model, Model):
       model = CallableModelWrapper(model, 'probs')
 
-    super(LBFGS, self).__init__(model, back, sess, dtypestr)
+    super(LBFGS, self).__init__(model, sess, dtypestr, **kwargs)
 
-    import tensorflow as tf
     self.feedable_kwargs = {'y_target': self.tf_dtype}
     self.structural_kwargs = [
         'batch_size', 'binary_search_steps', 'max_iterations',
@@ -1356,7 +1348,6 @@ class LBFGS(Attack):
     :param clip_min: (optional float) Minimum input component value
     :param clip_max: (optional float) Maximum input component value
     """
-    import tensorflow as tf
     from .attacks_tf import LBFGS_attack
     self.parse_params(**kwargs)
 
@@ -1446,12 +1437,12 @@ class FastFeatureAdversaries(Attack):
   (Kurakin et al. 2016) but applied to the internal representations.
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Create a FastFeatureAdversaries instance.
     """
-    super(FastFeatureAdversaries, self).__init__(model, back, sess,
-                                                 dtypestr)
+    super(FastFeatureAdversaries, self).__init__(model, sess, dtypestr,
+                                                 **kwargs)
     self.feedable_kwargs = {
         'eps': self.np_dtype,
         'eps_iter': self.np_dtype,
@@ -1515,8 +1506,6 @@ class FastFeatureAdversaries(Attack):
     :param g_feat: model's internal tensor for guide
     :return: a tensor for the adversarial example
     """
-    import tensorflow as tf
-    from cleverhans.utils_tf import clip_eta
 
     adv_x = x + eta
     a_feat = self.model.fprop(adv_x)[self.layer]
@@ -1564,8 +1553,6 @@ class FastFeatureAdversaries(Attack):
     :param clip_min: (optional float) Minimum input component value
     :param clip_max: (optional float) Maximum input component value
     """
-    import tensorflow as tf
-    from cleverhans.utils_tf import clip_eta
 
     # Parse and save attack-specific parameters
     assert self.parse_params(**kwargs)
@@ -1602,8 +1589,8 @@ class SPSA(Attack):
   gradients do not point in useful directions.
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
-    super(SPSA, self).__init__(model, back, sess, dtypestr)
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
+    super(SPSA, self).__init__(model, sess, dtypestr, **kwargs)
 
     self.feedable_kwargs = {
         'epsilon': self.np_dtype,
@@ -1661,6 +1648,11 @@ class SPSA(Attack):
                        different inputs.
     :param is_debug: If True, print the adversarial loss after each update.
     """
+    if x.get_shape().as_list()[0] is None:
+      warnings.warn("For SPSA, input tensor x must have batch_size of 1.")
+    elif x.get_shape().as_list()[0] != 1:
+      raise ValueError("For SPSA, input tensor x must have batch_size of 1.")
+
     from .attacks_tf import SPSAAdam, pgd_attack, margin_logit_loss
     if batch_size is not None:
       warnings.warn(
@@ -1712,7 +1704,7 @@ class SpatialTransformationMethod(Attack):
   Spatial transformation attack
   """
 
-  def __init__(self, model, back='tf', sess=None, dtypestr='float32'):
+  def __init__(self, model, sess=None, dtypestr='float32', **kwargs):
     """
     Create a SpatialTransformationMethod instance.
     Note: the model parameter should be an instance of the
@@ -1722,9 +1714,8 @@ class SpatialTransformationMethod(Attack):
       model = CallableModelWrapper(model, 'probs')
 
     super(SpatialTransformationMethod, self).__init__(
-        model, back, sess, dtypestr)
+        model, sess, dtypestr, **kwargs)
     self.feedable_kwargs = {
-        'batch_size': self.np_dtype,
         'n_samples': self.np_dtype,
         'dx_min': self.np_dtype,
         'dx_max': self.np_dtype,
@@ -1734,14 +1725,14 @@ class SpatialTransformationMethod(Attack):
         'n_dys': self.np_dtype,
         'angle_min': self.np_dtype,
         'angle_max': self.np_dtype,
-        'n_angles': self.np_dtype
+        'n_angles': self.np_dtype,
+        'black_border_size': self.np_dtype,
     }
 
   def generate(self, x, **kwargs):
     """
     Generate symbolic graph for adversarial examples and return.
     :param x: The model's symbolic inputs.
-    :param batch_size: (optional int) The size of batch during evaluation.
     :param n_samples: (optional) The number of transformations sampled to
                       construct the attack. Set it to None to run
                       full grid attack.
@@ -1757,6 +1748,7 @@ class SpatialTransformationMethod(Attack):
                       angle.
     :param angle_max: (optional float) Largest clockwise rotation angle.
     :param n_angles: (optional int) Number of discretized angles.
+    :param black_border_size: (optional int) size of the black border in pixels.
     """
     # Parse and save attack-specific parameters
     assert self.parse_params(**kwargs)
@@ -1768,16 +1760,14 @@ class SpatialTransformationMethod(Attack):
     return spm(
         x,
         self.model,
-        batch_size=self.batch_size,
         y=labels,
         n_samples=self.n_samples,
         dx_min=self.dx_min, dx_max=self.dx_max, n_dxs=self.n_dxs,
         dy_min=self.dy_min, dy_max=self.dy_max, n_dys=self.n_dys,
         angle_min=self.angle_min, angle_max=self.angle_max,
-        n_angles=self.n_angles)
+        n_angles=self.n_angles, black_border_size=self.black_border_size)
 
   def parse_params(self,
-                   batch_size=128,
                    n_samples=None,
                    dx_min=-0.1,
                    dx_max=0.1,
@@ -1788,12 +1778,12 @@ class SpatialTransformationMethod(Attack):
                    angle_min=-30,
                    angle_max=30,
                    n_angles=6,
+                   black_border_size=0,
                    **kwargs):
     """
     Take in a dictionary of parameters and applies attack-specific checks
     before saving them as attributes.
     """
-    self.batch_size = batch_size
     self.n_samples = n_samples
     self.dx_min = dx_min
     self.dx_max = dx_max
@@ -1804,9 +1794,223 @@ class SpatialTransformationMethod(Attack):
     self.angle_min = angle_min
     self.angle_max = angle_max
     self.n_angles = n_angles
+    self.black_border_size = black_border_size
 
     if self.dx_min < -1 or self.dy_min < -1 or \
        self.dx_max > 1 or self.dy_max > 1:
       raise ValueError("The value of translation must be bounded "
                        "within [-1, 1]")
     return True
+
+
+class Semantic(Attack):
+  """
+  Semantic adversarial examples
+
+  https://arxiv.org/abs/1703.06857
+
+  Note: data must either be centered (so that the negative image can be
+  made by simple negation) or must be in the interval [-1, 1]
+
+  model: cleverhans.model.Model
+  center: bool
+    If True, assumes data has 0 mean so the negative image is just negation.
+    If False, assumes data is in the interval [0, 1]
+  sess: tf.Session
+  dtypestr: dtype of data
+  """
+
+  def __init__(self, model, center, sess=None, dtypestr='float32', **kwargs):
+    super(Semantic, self).__init__(model, sess, dtypestr, **kwargs)
+    self.center = center
+    if hasattr(model, 'dataset_factory'):
+      if 'center' in model.dataset_factory.kwargs:
+        assert center == model.dataset_factory.kwargs['center']
+
+  def generate(self, x, **kwargs):
+    if self.center:
+      return -x
+    return 1. - x
+
+class Noise(Attack):
+  """
+  A weak attack that just picks a random point in the attacker's action space.
+  When combined with an attack bundling function, this can be used to implement
+  random search.
+
+  References:
+  https://arxiv.org/abs/1802.00420 recommends random search to help identify
+    gradient masking.
+  https://openreview.net/forum?id=H1g0piA9tQ recommends using noise as part
+    of an attack bundling recipe combining many different optimizers to yield
+    a stronger optimizer.
+
+  :param model: cleverhans.model.Model
+  :param sess: tf.Session
+  :param dtypestr: dtype of the data
+  :param kwargs: passed through to super constructor
+  """
+
+  def __init__(self, model, sess=None, dtypestr='float32',
+               **kwargs):
+
+    super(Noise, self).__init__(model, sess=sess, dtypestr=dtypestr, **kwargs)
+    self.feedable_kwargs = {
+        'eps': self.np_dtype,
+        'clip_min': self.np_dtype,
+        'clip_max': self.np_dtype
+    }
+    self.structural_kwargs = ['ord', 'clip']
+
+  def generate(self, x, **kwargs):
+    """
+    Generate symbolic graph for adversarial examples and return.
+
+    :param x: The model's symbolic inputs.
+    :param eps: (required float) maximum distortion of adversarial example
+                compared to original input
+    :param ord: (optional) Order of the norm (mimics Numpy).
+                Possible values: np.inf
+    :param clip_min: (optional float) Minimum input component value
+    :param clip_max: (optional float) Maximum input component value
+    """
+    kwargs['clip'] = kwargs['clip_min'] is not None or kwargs['clip_max'] is not None
+    # Parse and save attack-specific parameters
+    assert self.parse_params(**kwargs)
+
+    if self.ord != np.inf:
+      raise NotImplementedError(self.ord)
+    eta = tf.random_uniform(tf.shape(x), -self.eps, self.eps,
+                            dtype=self.tf_dtype)
+    adv_x = x + eta
+    if self.clip_min is not None and self.clip_max is not None:
+      adv_x = tf.clip_by_value(adv_x, self.clip_min, self.clip_max)
+
+    return adv_x
+
+  def parse_params(self,
+                   eps=0.3,
+                   ord=np.inf,
+                   clip_min=None,
+                   clip_max=None,
+                   clip=None,
+                   **kwargs):
+    """
+    Take in a dictionary of parameters and applies attack-specific checks
+    before saving them as attributes.
+
+    Attack-specific parameters:
+
+    :param eps: (required float) maximum distortion of adversarial example
+                compared to original input
+    :param ord: (optional) Order of the norm (mimics Numpy).
+                Possible values: np.inf
+    :param clip_min: (optional float) Minimum input component value
+    :param clip_max: (optional float) Maximum input component value
+    :param clip: bool specifying whether clip_min /clip_max are used
+    """
+
+    # Save attack-specific parameters
+    self.eps = eps
+    self.ord = ord
+    self.clip_min = clip_min
+    self.clip_max = clip_max
+    self.clip = clip
+    # Make sure clip was specified, rather than using the default None
+    assert clip in [False, True]
+    assert clip == (clip_min is not None or clip_max is not None)
+
+    # Check if order of the norm is acceptable given current implementation
+    if self.ord not in [np.inf]:
+      raise ValueError("Norm order must be np.inf")
+
+    return True
+
+class MaxConfidence(Attack):
+  """
+  The MaxConfidence attack.
+
+  An attack designed for use against models that use confidence thresholding
+  as a defense.
+  If the underlying optimizer is optimal, this attack procedure gives the
+  optimal failure rate for every confidence threshold t > 0.5.
+
+
+  Publication: https://openreview.net/forum?id=H1g0piA9tQ
+  """
+
+  def __init__(self, model, sess=None):
+    if not isinstance(model, Model):
+      raise TypeError("Model must be cleverhans.model.Model, got " +
+                      str(type(model)))
+
+    super(MaxConfidence, self).__init__(model, sess)
+    self.base_attacker = ProjectedGradientDescent(model, sess=sess)
+    self.structural_kwargs = self.base_attacker.structural_kwargs
+    self.feedable_kwargs = self.base_attacker.feedable_kwargs
+
+  def generate(self, x, **kwargs):
+    """
+    Generate symbolic graph for adversarial examples and return.
+
+    :param x: The model's symbolic inputs.
+    :param kwargs: Keyword arguments for the base attacker
+    """
+
+    assert self.parse_params(**kwargs)
+    labels, _nb_classes = self.get_or_guess_labels(x, kwargs)
+    adv_x = self.attack(x, labels)
+
+    return adv_x
+
+  def parse_params(self, y=None, nb_classes=10, **kwargs):
+    self.y = y
+    self.nb_classes = nb_classes
+    self.params = kwargs
+    return True
+
+  def attack(self, x, true_y):
+    adv_x_cls = []
+    prob_cls = []
+    m = tf.shape(x)[0]
+    true_y_idx = tf.argmax(true_y, axis=1)
+
+    expanded_x = tf.concat([x] * self.nb_classes, axis=0)
+    target_ys = [tf.to_float(tf.one_hot(tf.ones(m, dtype=tf.int32) * cls, self.nb_classes))
+                 for cls in range(self.nb_classes)]
+    target_y = tf.concat(target_ys, axis=0)
+    adv_x_cls = self.attack_class(expanded_x, target_y)
+    expanded_all_probs = self.model.get_probs(adv_x_cls)
+
+    adv_x_list = tf.split(adv_x_cls, self.nb_classes)
+    all_probs_list = tf.split(expanded_all_probs, self.nb_classes)
+
+    for cls in range(self.nb_classes):
+      target_y = target_ys[cls]
+      all_probs = all_probs_list[cls]
+      # We don't actually care whether we hit the target class.
+      # We care about the probability of the most likely wrong class
+      cur_prob_cls = tf.reduce_max(all_probs - true_y, axis=1)
+      # Knock out examples that are correctly classified.
+      # This is not needed to be optimal for t >= 0.5, but may as well do it
+      # to get better failure rate at lower thresholds.
+      chosen_cls = tf.argmax(all_probs, axis=1)
+      eligible = tf.to_float(tf.not_equal(true_y_idx, chosen_cls))
+      cur_prob_cls = cur_prob_cls * eligible
+      prob_cls.append(cur_prob_cls)
+
+    probs = tf.concat([tf.expand_dims(e, 1) for e in prob_cls], axis=1)
+    # Don't need to censor here because we knocked out the true class above
+    # probs = probs - true_y
+    most_confident = tf.argmax(probs, axis=1)
+    fused_mask = tf.one_hot(most_confident, self.nb_classes)
+    masks = tf.split(fused_mask, num_or_size_splits=self.nb_classes, axis=1)
+    shape = [m] + [1] * (len(x.get_shape()) - 1)
+    reshaped_masks = [tf.reshape(mask, shape) for mask in masks]
+    out = sum(adv_x * rmask for adv_x,
+              rmask in zip(adv_x_list, reshaped_masks))
+    return out
+
+  def attack_class(self, x, target_y):
+    adv = self.base_attacker.generate(x, y_target=target_y, **self.params)
+    return adv

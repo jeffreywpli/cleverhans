@@ -17,8 +17,8 @@ import os
 import unittest
 
 import numpy as np
-import tensorflow as tf
 from six.moves import xrange
+import tensorflow as tf
 from tensorflow.contrib import slim
 from tensorflow.contrib.slim.nets import inception
 from PIL import Image
@@ -87,7 +87,8 @@ class InceptionModel(Model):
   """Model class for CleverHans library."""
 
   def __init__(self, nb_classes):
-    self.nb_classes = nb_classes
+    super(InceptionModel, self).__init__(nb_classes=nb_classes,
+                                         needs_dummy_fprop=True)
     self.built = False
 
   def __call__(self, x_input, return_logits=False):
@@ -192,7 +193,7 @@ class TestSPSA(CleverHansTest):
           y_expanded = np.expand_dims(labels[i], axis=0)
 
           adv_image = sess.run(x_adv, feed_dict={x_input: x_expanded,
-                                                 y_label: y_exapnded})
+                                                 y_label: y_expanded})
           diff = adv_image - images[i]
           assert np.max(np.abs(diff)) < epsilon + 1e-4
           assert np.max(adv_image < 1. + 1e-4)

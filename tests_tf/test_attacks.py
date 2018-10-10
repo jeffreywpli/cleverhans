@@ -4,13 +4,13 @@ from __future__ import print_function
 from __future__ import unicode_literals
 
 import functools
-
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 import unittest
 import numpy as np
 
 from cleverhans.devtools.checks import CleverHansTest
+
 from cleverhans.attacks import Attack, SPSA
 from cleverhans.attacks import FastGradientMethod
 from cleverhans.attacks import BasicIterativeMethod
@@ -25,8 +25,8 @@ from cleverhans.attacks import ProjectedGradientDescent
 from cleverhans.attacks import FastFeatureAdversaries
 from cleverhans.attacks import LBFGS
 from cleverhans.attacks import SpatialTransformationMethod
+from cleverhans.initializers import HeReLuNormalInitializer
 from cleverhans.model import Model
-from cleverhans_tutorials.tutorial_models import HeReLuNormalInitializer
 
 
 class SimpleModel(Model):
@@ -81,7 +81,8 @@ class DummyModel(Model):
     def fprop(self, x, **kwargs):
         del kwargs
         with tf.variable_scope(self.scope, reuse=tf.AUTO_REUSE):
-            net = slim.fully_connected(x, 60)
+            net = slim.flatten(x)
+            net = slim.fully_connected(net, 60)
             logits = slim.fully_connected(net, 10, activation_fn=None)
             return {self.O_LOGITS: logits,
                     self.O_PROBS: tf.nn.softmax(logits)}
@@ -95,18 +96,14 @@ class TestAttackClassInitArguments(CleverHansTest):
         # Exception is thrown when model does not have __call__ attribute
         with self.assertRaises(Exception) as context:
             model = tf.placeholder(tf.float32, shape=(None, 10))
-            Attack(model, back='tf', sess=sess)
-        self.assertTrue(context.exception)
-
-    def test_back(self):
-        # Exception is thrown when back is not tf or th
-        with self.assertRaises(Exception) as context:
-            Attack(None, back='test', sess=None)
+            Attack(model, sess=sess)
         self.assertTrue(context.exception)
 
     def test_sess(self):
-        # Test that it is permitted to provide no session
-        Attack(Model('model', 10, {}), back='tf', sess=None)
+        # Test that it is permitted to provide no session.
+        # The session still needs to be created prior to running the attack.
+        with tf.Session() as sess:
+            Attack(Model('model', 10, {}), sess=None)
 
     def test_sess_generate_np(self):
         model = Model('model', 10, {})
@@ -115,17 +112,20 @@ class TestAttackClassInitArguments(CleverHansTest):
             def generate(self, x, **kwargs):
                 return x
 
-        attack = DummyAttack(model, back='tf', sess=None)
-        with self.assertRaises(Exception) as context:
-            attack.generate_np(0.)
-        self.assertTrue(context.exception)
+        # Test that generate_np is NOT permitted without a session.
+        # The session still needs to be created prior to running the attack.
+        with tf.Session() as sess:
+            attack = DummyAttack(model, sess=None)
+            with self.assertRaises(Exception) as context:
+                attack.generate_np(0.)
+            self.assertTrue(context.exception)
 
 
 class TestParseParams(CleverHansTest):
     def test_parse(self):
         sess = tf.Session()
 
-        test_attack = Attack(Model('model', 10, {}), back='tf', sess=sess)
+        test_attack = Attack(Model('model', 10, {}), sess=sess)
         self.assertTrue(test_attack.parse_params({}))
 
 
@@ -135,11 +135,11 @@ class TestVirtualAdversarialMethod(CleverHansTest):
 
         self.sess = tf.Session()
         self.sess.as_default()
-        self.model = DummyModel()
+        self.model = DummyModel('virtual_adv_dummy_model')
         self.attack = VirtualAdversarialMethod(self.model, sess=self.sess)
 
         # initialize model
-        with tf.name_scope('dummy_model'):
+        with tf.name_scope('virtual_adv_dummy_model'):
             self.model(tf.placeholder(tf.float32, shape=(None, 1000)))
         self.sess.run(tf.global_variables_initializer())
 
@@ -155,7 +155,7 @@ class TestVirtualAdversarialMethod(CleverHansTest):
     def test_generate_np(self):
         x_val = np.random.rand(100, 1000)
         perturbation = self.attack.generate_np(x_val) - x_val
-        perturbation_norm = np.sqrt(np.sum(perturbation**2, axis=1))
+        perturbation_norm = np.sqrt(np.sum(perturbation ** 2, axis=1))
         # test perturbation norm
         self.assertClose(perturbation_norm, self.attack.eps)
 
@@ -179,11 +179,12 @@ class TestFastGradientMethod(CleverHansTest):
         elif ord == 1:
             delta = np.sum(np.abs(x_adv - x_val), axis=1)
         elif ord == 2:
-            delta = np.sum(np.square(x_adv - x_val), axis=1)**.5
+            delta = np.sum(np.square(x_adv - x_val), axis=1) ** .5
 
         return x_val, x_adv, delta
 
-    def help_generate_np_gives_adversarial_example(self, ord, eps=.5, **kwargs):
+    def help_generate_np_gives_adversarial_example(self, ord, eps=.5,
+                                                   **kwargs):
         x_val, x_adv, delta = self.generate_adversarial_examples_np(ord, eps,
                                                                     **kwargs)
         self.assertClose(delta, eps)
@@ -201,7 +202,8 @@ class TestFastGradientMethod(CleverHansTest):
         self.help_generate_np_gives_adversarial_example(2)
 
     def test_generate_respects_dtype(self):
-        self.attack = FastGradientMethod(self.model, sess=self.sess, dtypestr='float64')
+        self.attack = FastGradientMethod(self.model, sess=self.sess,
+                                         dtypestr='float64')
         x = tf.placeholder(dtype=tf.float64, shape=(100, 2))
         x_adv = self.attack.generate(x)
         self.assertEqual(x_adv.dtype, tf.float64)
@@ -253,6 +255,7 @@ class TestFastGradientMethod(CleverHansTest):
 
         def fn(*x, **y):
             raise RuntimeError()
+
         tf.gradients = fn
 
         self.attack.generate_np(x_val, eps=.2, num_iterations=10,
@@ -279,7 +282,7 @@ class TestSPSA(CleverHansTest):
         # TODO: change this to use standard cleverhans label conventions
         feed_labs = np.random.randint(0, 2, n_samples)
 
-        x_input = tf.placeholder(tf.float32, shape=(1,2))
+        x_input = tf.placeholder(tf.float32, shape=(1, 2))
         y_label = tf.placeholder(tf.int32, shape=(1,))
 
         x_adv_op = self.attack.generate(
@@ -290,8 +293,8 @@ class TestSPSA(CleverHansTest):
         all_x_adv = []
         for i in range(n_samples):
             x_adv_np = self.sess.run(x_adv_op, feed_dict={
-                            x_input: np.expand_dims(x_val[i], axis=0),
-                             y_label: np.expand_dims(feed_labs[i], axis=0),
+                x_input: np.expand_dims(x_val[i], axis=0),
+                y_label: np.expand_dims(feed_labs[i], axis=0),
             })
             all_x_adv.append(x_adv_np[0])
 
@@ -384,7 +387,6 @@ class TestBasicIterativeMethod(TestFastGradientMethod):
         self.assertTrue(np.mean(orig_labs == new_labs) < 0.1)
 
     def test_generate_np_does_not_cache_graph_computation_for_nb_iter(self):
-
         x_val = np.random.rand(100, 2)
         x_val = np.array(x_val, dtype=np.float32)
 
@@ -402,6 +404,7 @@ class TestBasicIterativeMethod(TestFastGradientMethod):
         def fn(*x, **y):
             ok[0] = True
             return old_grads(*x, **y)
+
         tf.gradients = fn
 
         x_adv = self.attack.generate_np(x_val, eps=1.0, ord=np.inf,
@@ -555,7 +558,8 @@ class TestCarliniWagnerL2(CleverHansTest):
             x_val = np.random.rand(10, 1) - .5
             x_val = np.array(x_val, dtype=np.float32)
 
-            orig_labs = np.argmax(self.sess.run(trivial_model.get_logits(x_val)), axis=1)
+            orig_labs = np.argmax(
+                self.sess.run(trivial_model.get_logits(x_val)), axis=1)
             attack = CarliniWagnerL2(trivial_model, sess=self.sess)
             x_adv = attack.generate_np(x_val,
                                        max_iterations=100,
@@ -694,7 +698,8 @@ class TestElasticNetMethod(CleverHansTest):
             x_val = np.random.rand(10, 1) - .5
             x_val = np.array(x_val, dtype=np.float32)
 
-            orig_labs = np.argmax(self.sess.run(trivial_model.get_logits(x_val)), axis=1)
+            orig_labs = np.argmax(
+                self.sess.run(trivial_model.get_logits(x_val)), axis=1)
             attack = CarliniWagnerL2(trivial_model, sess=self.sess)
             x_adv = attack.generate_np(x_val,
                                        max_iterations=100,
@@ -769,7 +774,6 @@ class TestDeepFool(CleverHansTest):
         self.assertTrue(np.mean(orig_labs == new_labs) < 0.1)
 
     def test_generate_gives_adversarial_example(self):
-
         x_val = np.random.rand(100, 2)
         x_val = np.array(x_val, dtype=np.float32)
 
@@ -872,18 +876,19 @@ class TestMadryEtAl(CleverHansTest):
 
 
 class TestProjectedGradientDescent(TestMadryEtAl):
-  def setUp(self):
-    super(TestProjectedGradientDescent, self).setUp()
-    self.attack = ProjectedGradientDescent(self.model, sess=self.sess)
+    def setUp(self):
+        super(TestProjectedGradientDescent, self).setUp()
+        self.attack = ProjectedGradientDescent(self.model, sess=self.sess)
+
 
 class TestBasicIterativeMethod(TestMadryEtAl):
-  def setUp(self):
-    super(TestBasicIterativeMethod, self).setUp()
-    self.attack = BasicIterativeMethod(self.model, sess=self.sess)
+    def setUp(self):
+        super(TestBasicIterativeMethod, self).setUp()
+        self.attack = BasicIterativeMethod(self.model, sess=self.sess)
 
-  def test_multiple_initial_random_step(self):
-    # There is no initial random step, so nothing to test here
-    pass
+    def test_multiple_initial_random_step(self):
+        # There is no initial random step, so nothing to test here
+        pass
 
 
 class TestFastFeatureAdversaries(CleverHansTest):
@@ -926,7 +931,7 @@ class TestFastFeatureAdversaries(CleverHansTest):
         self.input_shape = [10, 224, 224, 3]
         self.sess = tf.Session()
         self.model = make_imagenet_cnn(self.input_shape)
-        self.attack = FastFeatureAdversaries(self.model)
+        self.attack = FastFeatureAdversaries(self.model, sess=self.sess)
 
     def test_attack_strength(self):
         """
@@ -941,7 +946,7 @@ class TestFastFeatureAdversaries(CleverHansTest):
         x_guide = tf.abs(tf.random_uniform(input_shape, 0., 1.))
 
         layer = 'fc7'
-        attack_params = {'eps': 5./256, 'clip_min': 0., 'clip_max': 1.,
+        attack_params = {'eps': 5. / 256, 'clip_min': 0., 'clip_max': 1.,
                          'nb_iter': 10, 'eps_iter': 0.005,
                          'layer': layer}
         x_adv = self.attack.generate(x_src, x_guide, **attack_params)
@@ -954,17 +959,17 @@ class TestFastFeatureAdversaries(CleverHansTest):
 
         ha, hs, hg, xa, xs, xg = self.sess.run(
             [h_adv, h_src, h_guide, x_adv, x_src, x_guide])
-        d_as = np.sqrt(((hs-ha)*(hs-ha)).sum())
-        d_ag = np.sqrt(((hg-ha)*(hg-ha)).sum())
-        d_sg = np.sqrt(((hg-hs)*(hg-hs)).sum())
+        d_as = np.sqrt(((hs - ha) * (hs - ha)).sum())
+        d_ag = np.sqrt(((hg - ha) * (hg - ha)).sum())
+        d_sg = np.sqrt(((hg - hs) * (hg - hs)).sum())
         print("L2 distance between source and adversarial example `%s`: %.4f" %
               (layer, d_as))
         print("L2 distance between guide and adversarial example `%s`: %.4f" %
               (layer, d_ag))
         print("L2 distance between source and guide `%s`: %.4f" %
               (layer, d_sg))
-        print("d_ag/d_sg*100 `%s`: %.4f" % (layer, d_ag*100/d_sg))
-        self.assertTrue(d_ag*100/d_sg < 50.)
+        print("d_ag/d_sg*100 `%s`: %.4f" % (layer, d_ag * 100 / d_sg))
+        self.assertTrue(d_ag * 100 / d_sg < 50.)
 
 
 class TestLBFGS(CleverHansTest):
@@ -1030,23 +1035,48 @@ class TestLBFGS(CleverHansTest):
         self.assertTrue(np.max(x_adv) < .301)
 
 
+class SimpleSpatialBrightPixelModel(Model):
+    """
+    If there is a bright pixel in the image returns the first class.
+    Otherwise returns the second class. Spatial attack should push the
+    bright pixels off of the image.
+    """
+
+    def __init__(self, scope='simple_spatial', nb_classes=2, **kwargs):
+        del kwargs
+        Model.__init__(self, scope, nb_classes, locals())
+
+    def fprop(self, x, **kwargs):
+        del kwargs
+
+        flat_x = slim.flatten(x)
+        first_logit = tf.reduce_max(flat_x, axis=1)
+        second_logit = tf.ones_like(first_logit) * 0.5
+        res = tf.stack([second_logit, first_logit], axis=1)
+        return {self.O_LOGITS: res,
+                self.O_PROBS: tf.nn.softmax(res)}
+
+
+@unittest.skipIf(
+    [int(v) for v in tf.__version__.split('.')[:2]] < [1, 6],
+    "SpatialAttack requires tf 1.6 or higher")
 class TestSpatialTransformationMethod(CleverHansTest):
     def setUp(self):
         super(TestSpatialTransformationMethod, self).setUp()
 
         self.sess = tf.Session()
-        self.model = DummyModel(scope='dummy_model_spatial')
+        self.model = SimpleSpatialBrightPixelModel()
         self.attack = SpatialTransformationMethod(self.model, sess=self.sess)
 
         # initialize model
         with tf.name_scope('dummy_model_spatial'):
-            self.model(tf.placeholder(tf.float32, shape=(None, 2, 2, 3)))
+            self.model(tf.placeholder(tf.float32, shape=(None, 2, 2, 1)))
         self.sess.run(tf.global_variables_initializer())
 
     def test_no_transformation(self):
-        x_val = np.random.rand(100, 2, 2, 3)
+        x_val = np.random.rand(100, 2, 2, 1)
         x_val = np.array(x_val, dtype=np.float32)
-        x = tf.placeholder(tf.float32, shape=(None, 2, 2, 3))
+        x = tf.placeholder(tf.float32, shape=(None, 2, 2, 1))
 
         x_adv_p = self.attack.generate(x, batch_size=100, dx_min=0.0,
                                        dx_max=0.0, n_dxs=1, dy_min=0.0,
@@ -1055,21 +1085,49 @@ class TestSpatialTransformationMethod(CleverHansTest):
         x_adv = self.sess.run(x_adv_p, {x: x_val})
         self.assertClose(x_adv, x_val)
 
-    def test_attack_strength(self):
-        x_val = np.random.rand(100, 2, 2, 3)
+    def test_push_pixels_off_image(self):
+        x_val = np.random.rand(100, 2, 2, 1)
         x_val = np.array(x_val, dtype=np.float32)
-        ttt = self.sess.run(self.model(x_val))
-        orig_labs = np.argmax(self.sess.run(self.model(x_val)), axis=1)
-        x = tf.placeholder(tf.float32, shape=(None, 2, 2, 3))
 
-        x_adv_p = self.attack.generate(x, batch_size=100, dx_min=-0.2,
-                                       dx_max=0.2, n_dxs=3, dy_min=-0.2,
-                                       dy_max=0.2, n_dys=3, angle_min=-45,
-                                       angle_max=45, n_angles=3)
+        # The correct answer is that they are bright
+        # So the attack must push the pixels off the edge
+        y = np.zeros([100, 2])
+        y[:, 0] = 1.
+
+        x = tf.placeholder(tf.float32, shape=(None, 2, 2, 1))
+        x_adv_p = self.attack.generate(x,
+                                       y=y, batch_size=100, dx_min=-0.5,
+                                       dx_max=0.5, n_dxs=3, dy_min=-0.5,
+                                       dy_max=0.5, n_dys=3, angle_min=0,
+                                       angle_max=0, n_angles=1)
         x_adv = self.sess.run(x_adv_p, {x: x_val})
+
+        old_labs = np.argmax(y, axis=1)
         new_labs = np.argmax(self.sess.run(self.model(x_adv)), axis=1)
-        self.assertTrue(np.mean(orig_labs == new_labs) < 0.7)
-        print(np.mean(orig_labs == new_labs) )
+        print(np.mean(old_labs == new_labs))
+        self.assertTrue(np.mean(old_labs == new_labs) < 0.3)
+
+    def test_keep_pixels_on_image(self):
+        x_val = np.random.rand(100, 2, 2, 1)
+        x_val = np.array(x_val, dtype=np.float32)
+
+        # The correct answer is that they are NOT bright
+        # So the attack must NOT push the pixels off the edge
+        y = np.zeros([100, 2])
+        y[:, 0] = 1.
+
+        x = tf.placeholder(tf.float32, shape=(None, 2, 2, 1))
+        x_adv_p = self.attack.generate(x,
+                                       y=y, batch_size=100, dx_min=-0.5,
+                                       dx_max=0.5, n_dxs=3, dy_min=-0.5,
+                                       dy_max=0.5, n_dys=3, angle_min=0,
+                                       angle_max=0, n_angles=1)
+        x_adv = self.sess.run(x_adv_p, {x: x_val})
+
+        old_labs = np.argmax(y, axis=1)
+        new_labs = np.argmax(self.sess.run(self.model(x_adv)), axis=1)
+        print(np.mean(old_labs == new_labs))
+        self.assertTrue(np.mean(old_labs == new_labs) < 0.3)
 
 
 if __name__ == '__main__':

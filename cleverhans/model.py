@@ -1,3 +1,6 @@
+"""
+The Model class and related functionality.
+"""
 from abc import ABCMeta
 import tensorflow as tf
 
@@ -80,7 +83,7 @@ class Model(object):
     except AttributeError:
       pass
 
-    # For Graoh based execution
+    # For graph-based execution
     scope_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
                                    self.scope)
 
@@ -155,6 +158,7 @@ class Model(object):
 
 
 class CallableModelWrapper(Model):
+  """A wrapper that turns a callable into a valid Model"""
 
   def __init__(self, callable_fn, output_layer):
     """
@@ -166,6 +170,7 @@ class CallableModelWrapper(Model):
                          function. (Usually either "probs" or "logits".)
     """
 
+    super(CallableModelWrapper, self).__init__()
     self.output_layer = output_layer
     self.callable_fn = callable_fn
 
